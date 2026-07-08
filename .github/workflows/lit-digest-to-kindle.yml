@@ -1,0 +1,59 @@
+name: Build lit digest and send to Kindle
+
+on:
+  schedule:
+    # 06:00 UTC on the 6th of every month. Bangalore Review is monthly,
+    # so this always catches their new issue. TBLM and Out of Print are
+    # quarterly and the recipe just grabs whatever their "current issue"
+    # is -- so in months without a new TBLM/OoP issue, this will re-send
+    # the same one again. See the README note below for how to avoid
+    # that if it bothers you.
+    - cron: '0 6 6 * *'
+  workflow_dispatch: {}   # lets you trigger a run manually from the Actions tab
+
+jobs:
+  build-and-send:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Install Calibre
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y calibre
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Compute current year/month (for the Bangalore Review recipe)
+        id: date
+        run: |
+          echo "year=$(LC_TIME=C date -u +%Y)" >> "$GITHUB_OUTPUT"
+          echo "month=$(LC_TIME=C date -u +%B | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Build epub
+        env:
+          TBR_YEAR: ${{ steps.date.outputs.year }}
+          TBR_MONTH: ${{ steps.date.outputs.month }}
+        run: |
+          ebook-convert recipes/south_asian_lit_digest.recipe south-asian-lit-digest.epub
+
+      - name: Upload epub as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: south-asian-lit-digest
+          path: south-asian-lit-digest.epub
+
+      - name: Email epub to Kindle
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
+          KINDLE_EMAIL: ${{ secrets.KINDLE_EMAIL }}
+        run: |
+          python3 scripts/send_to_kindle.py south-asian-lit-digest.epub

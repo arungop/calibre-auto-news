@@ -1,0 +1,291 @@
+from calibre.web.feeds.news import BasicNewsRecipe
+from urllib.parse import urljoin
+import os
+import re
+
+
+class SouthAsianLitDigest(BasicNewsRecipe):
+    title = "South Asian Lit Digest"
+    language = "en_IN"
+    description = (
+        "A combined digest of The Bangalore Review, The Bombay Literary "
+        "Magazine, and Out of Print Magazine, excluding poetry."
+    )
+    no_stylesheets = True
+    remove_javascript = True
+    auto_cleanup = True
+
+    def preprocess_html(self, soup):
+        """WordPress "lightbox" images are commonly wrapped as
+        <a href="full-res.jpg"><img src="thumbnail-194x300.jpg"></a> --
+        left as-is, only the tiny thumbnail ends up in the ebook. This
+        is most visible in TBLM's Graphic Fiction pieces, which are
+        sequences of comic-page images using exactly this pattern, so
+        every panel was coming through blurry and postage-stamp sized.
+        We swap in the full-resolution linked image wherever we detect
+        this wrapping, across all three sources."""
+        for img in soup.find_all("img"):
+            parent = img.parent
+            if parent and parent.name == "a" and parent.get("href"):
+                href = parent["href"]
+                if re.search(r"\.(jpe?g|png|gif|webp)(\?.*)?$", href, re.I):
+                    img["src"] = href
+        return soup
+
+    # ------------------------------------------------------------------
+    # The Bangalore Review
+    # ------------------------------------------------------------------
+    # We want everything in the issue EXCEPT poetry. Rather than keep a
+    # whitelist of every non-poetry section name (which changes as new
+    # sections get added over time), we blacklist the poetry ones and
+    # keep everything else.
+    tbr_exclude_sections = ["Poetry", "The Poetry Cast"]
+
+    # Real articles always live at bangalorereview.com/YYYY/MM/slug/.
+    # Nav, footer, and sidebar links never match this, so filtering on
+    # it is far more reliable than trying to detect section boundaries
+    # by matching heading/arrow text on the index page.
+    tbr_article_url_re = re.compile(r"^https://bangalorereview\.com/\d{4}/\d{2}/[^/?#]+/?$")
+
+    # An article page shows its section as a link right under the cover
+    # image, e.g. <a href=".../sections/short-fiction/">Short Fiction</a>.
+    tbr_section_link_re = re.compile(r"/sections/[^/]+/?$")
+
+    def tbr_issue_url(self):
+        year = os.environ.get("TBR_YEAR", "2026")
+        month = os.environ.get("TBR_MONTH", "june").lower()
+        return "https://bangalorereview.com/issues/%s/%s/" % (year, month)
+
+    def tbr_fetch_article_meta(self, url):
+        """Returns (title, description, section) read from the article's
+        own page. The issue page's "Contents" list crams title + author +
+        blurb into a single <a> with no separators, so fetching the real
+        article page instead gives clean, reliable metadata."""
+        title, description, section = None, "", None
+        try:
+            soup = self.index_to_soup(url)
+        except Exception as e:
+            self.log("Bangalore Review: could not fetch %s (%s)" % (url, e))
+            return title, description, section
+
+        h1 = soup.find("h1")
+        if h1:
+            title = self.tag_to_string(h1).strip()
+        if not title and soup.title:
+            raw_title = self.tag_to_string(soup.title).strip()
+            title = raw_title.split(" - The Bangalore Review")[0].strip()
+
+        meta_desc = soup.find("meta", attrs={"name": "description"})
+        if meta_desc and meta_desc.get("content"):
+            description = meta_desc["content"].strip()
+
+        section_link = soup.find("a", href=self.tbr_section_link_re)
+        if section_link:
+            section = self.tag_to_string(section_link).strip()
+
+        return title, description, section
+
+    def parse_tbr(self):
+        """Returns (issue_name, [(section_name, [article, ...]), ...])
+        for every non-poetry section of the current Bangalore Review
+        issue."""
+        issue_url = self.tbr_issue_url()
+        soup = self.index_to_soup(issue_url)
+
+        issue_name = "The Bangalore Review"
+        if soup.title:
+            raw_title = self.tag_to_string(soup.title).strip()
+            name = raw_title.split(" - The Bangalore Review")[0].strip()
+            if name:
+                issue_name = name
+
+        sections = {}
+        seen = set()
+        for tag in soup.find_all("a", href=True):
+            url = urljoin(issue_url, tag["href"])
+            if not self.tbr_article_url_re.match(url):
+                continue
+            if url in seen:
+                continue
+            seen.add(url)
+
+            title, description, section = self.tbr_fetch_article_meta(url)
+            if not section or section in self.tbr_exclude_sections:
+                continue
+            if not title:
+                title = self.tag_to_string(tag).strip() or url
+
+            self.log("Bangalore Review: found %s article: %s" % (section, title))
+            sections.setdefault(section, []).append({
+                "title": title,
+                "url": url,
+                "description": description,
+            })
+
+        feeds = [
+            ("Bangalore Review \u2013 %s" % name, arts)
+            for name, arts in sections.items()
+        ]
+        return issue_name, feeds
+
+    # ------------------------------------------------------------------
+    # The Bombay Literary Magazine
+    # ------------------------------------------------------------------
+    # TBLM only publishes 3 issues a year (April, August, December), so
+    # unlike Bangalore Review there's no month/year URL to construct --
+    # we just always follow the "Current Issue" link from their homepage.
+    tblm_exclude_sections = ["Poetry", "Translated Poetry"]
+
+    def tblm_current_issue_url(self):
+        home = self.index_to_soup("https://bombaylitmag.com/")
+        link = home.find("a", string=re.compile(r"Current Issue"))
+        if link and link.get("href"):
+            return urljoin("https://bombaylitmag.com/", link["href"])
+        # Fallback if the homepage nav text ever changes.
+        return "https://bombaylitmag.com/issue-63/"
+
+    def parse_tblm(self):
+        """Returns (issue_name, [(section_name, [article, ...]), ...])
+        for every non-poetry section of TBLM's current issue.
+
+        The issue page lists each section as an <h3> heading, followed
+        by alternating "author name" paragraphs and "[Title](url)"
+        links -- already clean, unlike Bangalore Review, so no need to
+        fetch each article's own page just to get a usable title. A
+        duplicate image-gallery re-listing of the same pieces appears
+        further down the page, but since it reuses the same hrefs, our
+        seen-url check quietly skips it.
+        """
+        issue_url = self.tblm_current_issue_url()
+        soup = self.index_to_soup(issue_url)
+
+        issue_name = "The Bombay Literary Magazine"
+        h1 = soup.find("h1")
+        if h1:
+            issue_name = self.tag_to_string(h1).strip() or issue_name
+
+        sections = {}
+        current_section = None
+        seen = set()
+
+        for tag in soup.find_all(["h3", "a"]):
+            if tag.name == "h3":
+                current_section = self.tag_to_string(tag).strip()
+                continue
+            if not current_section or not tag.get("href"):
+                continue
+            href = tag["href"]
+            if "/contribution/" not in href:
+                continue
+            url = urljoin(issue_url, href)
+            if url in seen:
+                continue
+            seen.add(url)
+
+            if current_section in self.tblm_exclude_sections:
+                continue
+
+            title = self.tag_to_string(tag).strip() or url
+            self.log("Bombay Lit Mag: found %s article: %s" % (current_section, title))
+            sections.setdefault(current_section, []).append({
+                "title": title,
+                "url": url,
+                "description": "",
+            })
+
+        feeds = [
+            ("Bombay Lit Mag \u2013 %s" % name, arts)
+            for name, arts in sections.items()
+        ]
+        return issue_name, feeds
+
+    # ------------------------------------------------------------------
+    # Out of Print Magazine
+    # ------------------------------------------------------------------
+    # Out of Print publishes only short fiction (no poetry section at
+    # all) quarterly -- March, June, September, December -- so there's
+    # nothing to exclude here. Like TBLM it isn't monthly, so we detect
+    # the current issue automatically instead of using TBR_MONTH/YEAR.
+    oop_article_url_re = re.compile(r"^https://outofprintmagazine\.co\.in/\d{4}/\d{2}/\d{2}/[^/?#]+/?$")
+
+    def oop_current_issue_slug(self):
+        """The homepage's intro text reads e.g. "ISSUE 60 | JUNE 2026".
+        We turn that into the category-page slug "june-2026"."""
+        home = self.index_to_soup("https://outofprintmagazine.co.in/")
+        text = self.tag_to_string(home.find("body")) if home.find("body") else ""
+        m = re.search(r"ISSUE\s+\d+\s*\|\s*([A-Za-z]+)\s+(\d{4})", text)
+        if m:
+            return "%s-%s" % (m.group(1).lower(), m.group(2))
+        return None
+
+    def parse_oop(self):
+        """Returns (issue_name, [(section_name, [article, ...]), ...])
+        for the current Out of Print issue. The category page lists each
+        story as a "###### [Title](url)" heading immediately followed by
+        a duplicate "Read More" link to the same URL -- our seen-url
+        check keeps only the first (title) occurrence of each."""
+        slug = self.oop_current_issue_slug()
+        if not slug:
+            raise ValueError("Could not determine Out of Print's current issue")
+
+        issue_url = "https://outofprintmagazine.co.in/category/%s/" % slug
+        soup = self.index_to_soup(issue_url)
+
+        issue_name = "Out of Print Magazine"
+        h1 = soup.find("h1")
+        if h1:
+            issue_name = "Out of Print \u2013 %s" % self.tag_to_string(h1).strip()
+
+        articles = []
+        seen = set()
+        for tag in soup.find_all("a", href=True):
+            url = urljoin(issue_url, tag["href"])
+            if not self.oop_article_url_re.match(url):
+                continue
+            if url in seen:
+                continue
+            seen.add(url)
+
+            title = self.tag_to_string(tag).strip()
+            if not title:
+                continue
+
+            self.log("Out of Print: found article: %s" % title)
+            articles.append({
+                "title": title,
+                "url": url,
+                "description": "",
+            })
+
+        return issue_name, [("Out of Print \u2013 Fiction", articles)]
+
+    # ------------------------------------------------------------------
+    def parse_index(self):
+        all_feeds = []
+        issue_names = []
+
+        try:
+            tbr_name, tbr_feeds = self.parse_tbr()
+            issue_names.append(tbr_name)
+            all_feeds.extend(tbr_feeds)
+        except Exception as e:
+            self.log("Bangalore Review section failed entirely: %s" % e)
+
+        try:
+            tblm_name, tblm_feeds = self.parse_tblm()
+            issue_names.append(tblm_name)
+            all_feeds.extend(tblm_feeds)
+        except Exception as e:
+            self.log("Bombay Lit Mag section failed entirely: %s" % e)
+
+        try:
+            oop_name, oop_feeds = self.parse_oop()
+            issue_names.append(oop_name)
+            all_feeds.extend(oop_feeds)
+        except Exception as e:
+            self.log("Out of Print section failed entirely: %s" % e)
+
+        if issue_names:
+            self.title = " & ".join(issue_names) + " - No Poetry"
+
+        return all_feeds
