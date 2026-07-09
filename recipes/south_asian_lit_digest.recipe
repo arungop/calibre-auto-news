@@ -15,6 +15,12 @@ class SouthAsianLitDigest(BasicNewsRecipe):
     remove_javascript = True
     auto_cleanup = True
 
+    # Full-res lightbox swaps below can balloon the epub past Gmail's
+    # ~25 MB send limit. Compress and scale for Kindle screens.
+    compress_news_images = True
+    compress_news_images_max_size = 128  # KB per image
+    scale_news_images_to_device = True
+
     def preprocess_html(self, soup):
         """WordPress "lightbox" images are commonly wrapped as
         <a href="full-res.jpg"><img src="thumbnail-194x300.jpg"></a> --

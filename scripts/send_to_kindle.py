@@ -22,6 +22,9 @@ import sys
 from email.message import EmailMessage
 from pathlib import Path
 
+# Gmail rejects messages over 25 MB; base64 encoding adds ~33% overhead.
+MAX_EPUB_BYTES = 18 * 1024 * 1024
+
 
 def main():
     if len(sys.argv) != 2:
@@ -31,6 +34,18 @@ def main():
     epub_path = Path(sys.argv[1])
     if not epub_path.exists():
         print(f"ERROR: {epub_path} not found", file=sys.stderr)
+        sys.exit(1)
+
+    epub_size = epub_path.stat().st_size
+    if epub_size > MAX_EPUB_BYTES:
+        mb = epub_size / (1024 * 1024)
+        limit_mb = MAX_EPUB_BYTES / (1024 * 1024)
+        print(
+            f"ERROR: {epub_path.name} is {mb:.1f} MB, over the ~{limit_mb:.0f} MB "
+            "limit for Gmail attachments. Enable image compression in the recipe "
+            "or split the digest into smaller epubs.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     try:

@@ -39,13 +39,18 @@ jobs:
           TBR_YEAR: ${{ steps.date.outputs.year }}
           TBR_MONTH: ${{ steps.date.outputs.month }}
         run: |
-          ebook-convert recipes/south_asian_lit_digest.recipe south-asian-lit-digest.epub
+          ebook-convert recipes/south_asian_lit_digest.recipe south-asian-lit-digest.epub \
+            --output-profile kindle \
+            --epub-max-image-size profile
 
       - name: Upload epub as a workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: south-asian-lit-digest
           path: south-asian-lit-digest.epub
+
+      - name: Check epub size
+        run: ls -lh south-asian-lit-digest.epub
 
       - name: Email epub to Kindle
         env:
