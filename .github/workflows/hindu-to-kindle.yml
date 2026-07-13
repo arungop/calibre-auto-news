@@ -1,0 +1,51 @@
+name: Build The Hindu and send to Kindle
+
+on:
+  schedule:
+    # 06:00 IST (00:30 UTC) every day
+    - cron: '30 0 * * *'
+  workflow_dispatch: {}   # lets you trigger a run manually from the Actions tab
+
+jobs:
+  build-and-send:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Install Calibre
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y calibre
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Build epub
+        run: |
+          ebook-convert recipes/hindu.recipe the-hindu.epub \
+            --output-profile kindle \
+            --epub-max-image-size profile \
+            --recipe-specific-option=location:thiruvananthapuram
+
+      - name: Upload epub as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: the-hindu
+          path: the-hindu.epub
+
+      - name: Check epub size
+        run: ls -lh the-hindu.epub
+
+      - name: Email epub to Kindle
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
+          KINDLE_EMAIL: ${{ secrets.KINDLE_EMAIL }}
+        run: |
+          python3 scripts/send_to_kindle.py the-hindu.epub
