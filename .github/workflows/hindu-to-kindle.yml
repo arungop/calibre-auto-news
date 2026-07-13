@@ -14,9 +14,12 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Calibre
+        # Install the latest Calibre from the official installer. The apt
+        # package on the runner is too old and lacks --recipe-specific-option.
         run: |
           sudo apt-get update
-          sudo apt-get install -y calibre
+          sudo apt-get install -y libopengl0 libegl1 libxcb-cursor0 xdg-utils
+          sudo -v && wget -nv -O- https://download.calibre-ebook.com/linux-installer.sh | sudo sh /dev/stdin
 
       - name: Set up Python
         uses: actions/setup-python@v5
