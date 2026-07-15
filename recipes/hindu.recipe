@@ -22,6 +22,43 @@ class TheHindu(BasicNewsRecipe):
     no_stylesheets = True
     masthead_url = 'https://www.thehindu.com/theme/images/th-online/thehindu-logo.svg'
     remove_attributes = ['style', 'height', 'width']
+    # ~15 full-length Hindu articles ≈ 30 minutes of reading.
+    max_articles_per_feed = 5
+    max_articles_total = 20
+
+    # Keep only sections that are worth a full read. Matching is case-insensitive
+    # substring against the print-section name (after stripping the TH_ prefix).
+    # The configured local edition name (e.g. thiruvananthapuram) is also kept.
+    keep_sections = (
+        'front page',
+        'national',
+        'international',
+        'foreign',
+        'editorial',
+        'opinion',
+        'edit',
+        'kerala',
+        'states',
+        'regional',
+        'metro',
+        'city',
+    )
+
+    # Prefer these section types when trimming down to max_articles_total.
+    section_priority = (
+        'front page',
+        'editorial',
+        'opinion',
+        'edit',
+        'national',
+        'international',
+        'foreign',
+        'kerala',
+        'states',
+        'regional',
+        'metro',
+        'city',
+    )
 
     extra_css = '''
         .caption {font-size:small; text-align:center;}
@@ -49,6 +86,47 @@ class TheHindu(BasicNewsRecipe):
     }
 
     ignore_duplicate_articles = {'url'}
+
+    def _keep_section(self, section):
+        name = section.lower()
+        if any(key in name for key in self.keep_sections):
+            return True
+        # Always keep the local edition's own pages (city/district name).
+        loc = self.recipe_specific_options.get('location')
+        if isinstance(loc, str) and loc.lower() in name:
+            return True
+        return False
+
+    def _section_rank(self, section):
+        name = section.lower()
+        for i, key in enumerate(self.section_priority):
+            if key in name:
+                return i
+        loc = self.recipe_specific_options.get('location')
+        if isinstance(loc, str) and loc.lower() in name:
+            return len(self.section_priority) - 1
+        return len(self.section_priority)
+
+    def _trim_feeds(self, feeds):
+        """Keep at most max_articles_total, preferring higher-priority sections."""
+        limit = self.max_articles_total
+        per_feed = self.max_articles_per_feed
+        ranked = sorted(feeds, key=lambda item: self._section_rank(item[0]))
+        trimmed = []
+        remaining = limit
+        for section, articles in ranked:
+            if remaining <= 0:
+                self.log('Dropping section (budget exhausted):', section)
+                continue
+            take = min(per_feed, remaining, len(articles))
+            kept = articles[:take]
+            remaining -= len(kept)
+            self.log(
+                'Keeping %d/%d from %s (%d left in budget)'
+                % (len(kept), len(articles), section, remaining)
+            )
+            trimmed.append((section, kept))
+        return trimmed
 
     keep_only_tags = [
         classes('article-section')
@@ -88,16 +166,7 @@ class TheHindu(BasicNewsRecipe):
         if local_edition == 'th_chennai' and today == date.today().strftime('%Y-%m-%d'):
             url = absurl('/todays-paper/')
 
-        mag_url = None
-        if dt.weekday() == 0:
-            mag_url = url + '?supplement=' + local_edition + '-epbs'
-        if dt.weekday() == 4:
-            mag_url = url + '?supplement=' + local_edition + '-fr'
-        if dt.weekday() == 5:
-            mag_url = url + '?supplement=' + local_edition + '-mp'
-        if dt.weekday() == 6:
-            mag_url = url + '?supplement=' + local_edition + '-sm'
-
+        # Skip Monday/Friday/weekend magazine supplements — they blow up volume.
         raw = self.index_to_soup(url, raw=True)
         soup = self.index_to_soup(raw)
         ans = self.hindu_parse_index(soup)
@@ -108,15 +177,7 @@ class TheHindu(BasicNewsRecipe):
         cover = soup.find(attrs={'class':'hindu-ad'})
         if cover:
             self.cover_url = cover.img['src']
-        if mag_url:
-            self.log('\nFetching Magazine')
-            soup = self.index_to_soup(mag_url)
-            ans2 = self.hindu_parse_index(soup)
-            if ans2:
-                return ans + ans2
-            self.log('\nMagazine not Found')
-            return ans
-        return ans
+        return self._trim_feeds(ans)
 
     def hindu_parse_index(self, soup):
         for script in soup.findAll('script'):
@@ -130,8 +191,12 @@ class TheHindu(BasicNewsRecipe):
 
                 a = json.dumps(data)
                 for sec in json.loads(a):
+                    section = sec.replace('TH_', '')
+                    if not self._keep_section(section):
+                        self.log('Skipping section:', section)
+                        continue
+                    self.log('\nSection:', section)
                     for item in data[sec]:
-                        section = sec.replace('TH_', '')
                         title = item['articleheadline']
                         url = absurl(item['href'])
                         desc = 'Page no.' + item['pageno'] + ' | ' + item['teaser_text'] or ''
